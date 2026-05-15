@@ -1,0 +1,2 @@
+# Patches for rate_guard
+# Format: app_name.module.patch_module

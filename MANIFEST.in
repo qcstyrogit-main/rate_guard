@@ -1,0 +1,2 @@
+include MANIFEST.in
+recursive-include rate_guard *.html *.css *.js *.csv *.txt *.md *.json *.py
