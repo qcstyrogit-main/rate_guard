@@ -1,14 +1,12 @@
 """
 rate_guard.overrides
 ====================
-Enforces the "Allow Rate" role across:
-  - All DocType form loads        (doc_events onload)
-  - All Query / Script Reports    (override_whitelisted_methods)
-  - Report Summaries              (stripped from report response)
+Enforces the "Allow Rate" role — pure backend, no JS required.
 
-Users WITHOUT the "Allow Rate" role will receive None / blank for every
-field that is classified as a financial figure.  The data is stripped
-server-side — it never travels to the browser.
+Users WITHOUT "Allow Rate":
+  - Forms   : financial fields removed from metadata + values stripped
+  - Reports : financial columns removed entirely from response
+  - API     : values never sent to browser
 
 Administrator always bypasses the restriction.
 """
@@ -19,10 +17,8 @@ import frappe
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Field types that are always treated as financial
 FINANCIAL_FIELDTYPES = frozenset(["Currency", "Percent"])
 
-# For Float fields, only hide if the fieldname / label contains one of these
 FINANCIAL_FLOAT_KEYWORDS = frozenset([
     "rate", "amount", "price", "cost", "value", "total",
     "pay", "paid", "salary", "wage", "charge", "fee",
@@ -34,8 +30,6 @@ FINANCIAL_FLOAT_KEYWORDS = frozenset([
     "base_grand", "plc_conversion",
 ])
 
-# Float fields that look financial but should ALWAYS remain visible
-# (quantities, progress counters, etc.)
 ALWAYS_VISIBLE = frozenset([
     "qty", "stock_qty", "ordered_qty", "billed_qty",
     "received_qty", "delivered_qty", "actual_qty",
@@ -50,45 +44,31 @@ ALWAYS_VISIBLE = frozenset([
 # ---------------------------------------------------------------------------
 
 def has_allow_rate() -> bool:
-    """Return True if the current user is allowed to see financial figures."""
     user = frappe.session.user
     if user == "Administrator":
         return True
     if user == "Guest":
         return False
-    return frappe.has_role("Allow Rate")
+    return "Allow Rate" in frappe.get_roles(user)
 
 
 def _is_financial_field(field) -> bool:
-    """Return True if the field should be hidden from non-Allow-Rate users."""
-    ft = field.fieldtype
+    ft = getattr(field, "fieldtype", None) or field.get("fieldtype", "")
+    fn = (getattr(field, "fieldname", None) or field.get("fieldname", "") or "").lower()
+    lb = (getattr(field, "label", None) or field.get("label", "") or "").lower()
 
-    # Always hide Currency and Percent
     if ft in FINANCIAL_FIELDTYPES:
         return True
-
     if ft == "Float":
-        fn = (field.fieldname or "").lower()
-        lb = (field.label or "").lower()
-
-        # Never hide quantity / location / non-financial floats
         if fn in ALWAYS_VISIBLE:
             return False
-
-        # Hide if the name or label suggests a monetary / rate value
         for kw in FINANCIAL_FLOAT_KEYWORDS:
             if kw in fn or kw in lb:
                 return True
-
     return False
 
 
 def _is_financial_column(col) -> bool:
-    """
-    Return True if a report column is financial.
-    col may be a dict or a colon-delimited string such as
-    "fieldname:fieldtype:Label:width".
-    """
     if isinstance(col, dict):
         ft = col.get("fieldtype", "") or ""
         fn = (col.get("fieldname") or col.get("key") or "").lower()
@@ -103,19 +83,16 @@ def _is_financial_column(col) -> bool:
 
     if ft in FINANCIAL_FIELDTYPES:
         return True
-
     if ft == "Float":
         if fn in ALWAYS_VISIBLE:
             return False
         for kw in FINANCIAL_FLOAT_KEYWORDS:
             if kw in fn or kw in lb:
                 return True
-
     return False
 
 
 def _get_col_fieldname(col):
-    """Extract fieldname / key from a column definition."""
     if isinstance(col, dict):
         return col.get("fieldname") or col.get("key")
     if isinstance(col, str):
@@ -123,34 +100,117 @@ def _get_col_fieldname(col):
     return None
 
 
-# ---------------------------------------------------------------------------
-# Doc Event — hides fields on every document load
-# ---------------------------------------------------------------------------
-
-def hide_rates_on_load(doc, method=None):
-    """
-    Called via doc_events → "*" → onload.
-    Strips financial field values from the document before it is
-    serialised and sent to the client.
-    """
+def _strip_doc_financial_fields(doc):
+    """Strip financial values from a doc dict and its child table rows."""
+    if not isinstance(doc, dict):
+        return
+    doctype = doc.get("doctype", "")
+    if not doctype:
+        return
     try:
-        if has_allow_rate():
-            return
-
-        meta = frappe.get_meta(doc.doctype)
+        meta = frappe.get_meta(doctype)
         for field in meta.fields:
             if _is_financial_field(field):
-                doc.set(field.fieldname, "*****")
+                doc[field.fieldname] = None
 
+            elif field.fieldtype in ("Table", "Table MultiSelect"):
+                child_rows = doc.get(field.fieldname) or []
+                if not child_rows:
+                    continue
+                try:
+                    child_meta = frappe.get_meta(field.options)
+                    for row in child_rows:
+                        if isinstance(row, dict):
+                            for cf in child_meta.fields:
+                                if _is_financial_field(cf):
+                                    row[cf.fieldname] = None
+                except Exception:
+                    pass
     except Exception:
-        # Never break a document load — fail silently
         pass
 
 
 # ---------------------------------------------------------------------------
-# Report Override — masks numeric columns in query / script report results
+# Doc Event — strips values on document load (also covers REST API)
 # ---------------------------------------------------------------------------
 
+def hide_rates_on_load(doc, method=None):
+    try:
+        if has_allow_rate():
+            return
+        meta = frappe.get_meta(doc.doctype)
+        for field in meta.fields:
+            if _is_financial_field(field):
+                doc.set(field.fieldname, None)
+            elif field.fieldtype in ("Table", "Table MultiSelect"):
+                child_rows = doc.get(field.fieldname) or []
+                if not child_rows:
+                    continue
+                try:
+                    child_meta = frappe.get_meta(field.options)
+                    for row in child_rows:
+                        for cf in child_meta.fields:
+                            if _is_financial_field(cf):
+                                row.set(cf.fieldname, None)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Form Load Override — strips field definitions from metadata
+# so financial fields never render in the form at all
+# ---------------------------------------------------------------------------
+
+@frappe.whitelist()
+def getdoc_override(doctype, name, user=None):
+    """
+    Replacement for frappe.desk.form.load.getdoc
+    Calls the original, then:
+      1. Strips financial field VALUES from every doc in the response
+      2. Removes financial field DEFINITIONS from the doctype metadata
+         so the fields are not rendered in the form at all
+    """
+    from frappe.desk.form.load import getdoc as _original_getdoc
+
+    _original_getdoc(doctype, name, user)
+
+    if has_allow_rate():
+        return
+
+    # 1. Strip values from docs in the response
+    docs = frappe.response.get("docs") or []
+    for doc in docs:
+        _strip_doc_financial_fields(doc)
+
+    # 2. Remove financial field definitions from the meta inside the response
+    #    so the form never renders those columns/fields
+    for doc in docs:
+        if isinstance(doc, dict) and doc.get("doctype") == doctype:
+            # Strip from inline docfields if present
+            if "fields" in doc:
+                doc["fields"] = [
+                    f for f in doc["fields"]
+                    if not _is_financial_field(f)
+                ]
+
+    # 3. Also patch the meta stored in frappe.response if present
+    meta_docs = [d for d in docs if isinstance(d, dict)
+                 and d.get("doctype") == "DocType"]
+    for meta_doc in meta_docs:
+        if "fields" in meta_doc:
+            meta_doc["fields"] = [
+                f for f in meta_doc["fields"]
+                if not _is_financial_field(f)
+            ]
+
+
+# ---------------------------------------------------------------------------
+# Report Override — removes financial columns entirely
+# ---------------------------------------------------------------------------
+
+@frappe.whitelist()
 def run_report_override(
     report_name,
     filters=None,
@@ -163,10 +223,6 @@ def run_report_override(
     is_tree=False,
     parent_field=None,
 ):
-    """
-    Replacement for frappe.desk.query_report.run
-    Calls the original, then strips financial columns for unauthorised users.
-    """
     from frappe.desk.query_report import run as _original_run
 
     result = _original_run(
@@ -185,22 +241,16 @@ def run_report_override(
     if has_allow_rate():
         return result
 
-    _mask_report_result(result)
+    _remove_financial_columns(result)
     return result
 
 
-def _mask_report_result(result: dict) -> None:
-    """
-    Mutate *result* in-place:
-      - Blank out values in financial columns for every data row.
-      - Remove report_summary (contains aggregated financial figures).
-      - Remove chart data (may contain financial figures on axes).
-    """
+def _remove_financial_columns(result: dict) -> None:
+    """Remove financial columns and their values entirely from report result."""
     columns = result.get("columns") or []
     rows    = result.get("result")  or []
 
-    # Identify financial columns by index and by fieldname
-    financial_indices   = set()
+    financial_indices    = set()
     financial_fieldnames = set()
 
     for i, col in enumerate(columns):
@@ -211,31 +261,26 @@ def _mask_report_result(result: dict) -> None:
                 financial_fieldnames.add(fn)
 
     if not financial_indices and not financial_fieldnames:
-        return  # Nothing to mask
+        return
 
-    masked_rows = []
+    # Remove columns from header
+    result["columns"] = [
+        col for i, col in enumerate(columns)
+        if i not in financial_indices
+    ]
+
+    # Remove values from rows
+    clean_rows = []
     for row in rows:
         if isinstance(row, dict):
-            row = dict(row)
-            for fn in financial_fieldnames:
-                if fn in row:
-                    row[fn] = "*****"
-            masked_rows.append(row)
-
+            clean_rows.append({k: v for k, v in row.items()
+                                if k not in financial_fieldnames})
         elif isinstance(row, (list, tuple)):
-            row = list(row)
-            for idx in financial_indices:
-                if idx < len(row):
-                    row[idx] = "*****"
-            masked_rows.append(row)
-
+            clean_rows.append([v for i, v in enumerate(row)
+                                if i not in financial_indices])
         else:
-            masked_rows.append(row)
+            clean_rows.append(row)
 
-    result["result"] = masked_rows
-
-    # Strip summary cards (they expose financial totals)
+    result["result"]         = clean_rows
     result["report_summary"] = []
-
-    # Strip chart payload
     result.pop("chart", None)
