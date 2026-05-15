@@ -8,22 +8,18 @@ app_color       = "red"
 app_email       = ""
 app_license     = "MIT"
 
-# ---------------------------------------------------------------------------
-# Document Events
-# Fires on every DocType load — hides Currency / Float / Percent fields
-# for users who do NOT have the "Allow Rate" role.
-# ---------------------------------------------------------------------------
 doc_events = {
     "*": {
         "onload": "rate_guard.overrides.hide_rates_on_load",
     }
 }
 
-# ---------------------------------------------------------------------------
-# Method Overrides
-# Wraps the core report runner so numeric columns are blanked-out in the
-# response before it ever reaches the browser.
-# ---------------------------------------------------------------------------
 override_whitelisted_methods = {
-    "frappe.desk.query_report.run": "rate_guard.overrides.run_report_override",
+    "frappe.desk.query_report.run":                    "rate_guard.overrides.run_report_override",
+    "frappe.desk.query_report.export_query":           "rate_guard.overrides.export_query_report_override",
+    "frappe.desk.reportview.export_query":             "rate_guard.overrides.export_listview_override",
+    "frappe.utils.print_format.report_to_pdf":         "rate_guard.overrides.report_to_pdf_override",
+    "frappe.utils.print_format.download_pdf":          "rate_guard.overrides.download_pdf_override",
+    "frappe.desk.form.load.getdoc":                    "rate_guard.overrides.getdoc_override",
 }
+
