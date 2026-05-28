@@ -1,0 +1,218 @@
+(function () {
+	if (!window.frappe) return;
+
+	const FINANCIAL_FIELDTYPES = new Set(["Currency", "Percent"]);
+	const FINANCIAL_FLOAT_KEYWORDS = [
+		"rate",
+		"amount",
+		"price",
+		"cost",
+		"value",
+		"total",
+		"pay",
+		"paid",
+		"salary",
+		"wage",
+		"charge",
+		"fee",
+		"tax",
+		"discount",
+		"margin",
+		"exchange",
+		"commission",
+		"interest",
+		"premium",
+		"rebate",
+		"billing",
+		"costing",
+		"overhead",
+		"grand",
+		"net",
+		"gross",
+		"outstanding",
+		"valuation",
+		"incoming_rate",
+		"outgoing_rate",
+		"hour_rate",
+		"base_rate",
+		"base_amount",
+		"base_total",
+		"base_net",
+		"base_grand",
+	];
+	const ALWAYS_VISIBLE = new Set([
+		"qty",
+		"stock_qty",
+		"ordered_qty",
+		"billed_qty",
+		"received_qty",
+		"delivered_qty",
+		"actual_qty",
+		"projected_qty",
+		"reserved_qty",
+		"transfer_qty",
+		"conversion_factor",
+		"uom_conversion_factor",
+		"conversion_rate",
+		"plc_conversion_rate",
+		"idx",
+		"docstatus",
+		"progress",
+		"percent_complete",
+		"cost_allocation_per",
+		"process_loss_percentage",
+		"process_loss_per",
+		"rate_per_minute",
+		"custom_rate_per_minute",
+		"latitude",
+		"longitude",
+	]);
+
+	function has_allow_rate() {
+		return frappe.session?.user === "Administrator" || (frappe.user_roles || []).includes("Allow Rate");
+	}
+
+	function is_financial_field(df) {
+		if (!df) return false;
+
+		const fieldtype = df.fieldtype || "";
+		const fieldname = String(df.fieldname || "").toLowerCase();
+		const label = String(df.label || "").toLowerCase();
+
+		if (ALWAYS_VISIBLE.has(fieldname)) return false;
+		if (FINANCIAL_FIELDTYPES.has(fieldtype)) return true;
+		if (fieldtype === "Float") {
+			return FINANCIAL_FLOAT_KEYWORDS.some((kw) => fieldname.includes(kw) || label.includes(kw));
+		}
+
+		return false;
+	}
+
+	function hide_field_without_client_mandatory(frm, df) {
+		df.hidden = 1;
+		df.reqd = 0;
+		df.in_list_view = 0;
+		df.in_standard_filter = 0;
+
+		frm.set_df_property(df.fieldname, "hidden", 1);
+		frm.set_df_property(df.fieldname, "reqd", 0);
+		frm.set_df_property(df.fieldname, "in_list_view", 0);
+		frm.set_df_property(df.fieldname, "in_standard_filter", 0);
+	}
+
+	function hide_grid_field_without_client_mandatory(grid, child_doctype, child_df) {
+		child_df.hidden = 1;
+		child_df.reqd = 0;
+		child_df.in_list_view = 0;
+		child_df.in_standard_filter = 0;
+
+		const mapped_df = frappe.meta?.docfield_map?.[child_doctype]?.[child_df.fieldname];
+		if (mapped_df) {
+			mapped_df.hidden = 1;
+			mapped_df.reqd = 0;
+			mapped_df.in_list_view = 0;
+			mapped_df.in_standard_filter = 0;
+		}
+
+		grid.update_docfield_property(child_df.fieldname, "hidden", 1);
+		grid.update_docfield_property(child_df.fieldname, "reqd", 0);
+		grid.update_docfield_property(child_df.fieldname, "in_list_view", 0);
+		grid.update_docfield_property(child_df.fieldname, "in_standard_filter", 0);
+	}
+
+	function hide_financial_fields(frm) {
+		if (!frm || has_allow_rate() || frm.__rate_guard_applying) return;
+		frm.__rate_guard_applying = true;
+
+		try {
+			(frm.meta?.fields || []).forEach((df) => {
+				if (is_financial_field(df)) {
+					hide_field_without_client_mandatory(frm, df);
+				} else if (
+					(frappe.model.table_fields || []).includes(df.fieldtype) &&
+					frm.fields_dict[df.fieldname]?.grid
+				) {
+					const grid = frm.fields_dict[df.fieldname].grid;
+					const child_meta = frappe.get_meta(df.options);
+
+					(child_meta?.fields || []).forEach((child_df) => {
+						if (!is_financial_field(child_df)) return;
+
+						hide_grid_field_without_client_mandatory(grid, df.options, child_df);
+					});
+
+					grid.refresh();
+				}
+			});
+		} finally {
+			frm.__rate_guard_applying = false;
+		}
+	}
+
+	function install_form_hooks() {
+		if (has_allow_rate() || !frappe.ui?.form?.Form?.prototype) return;
+
+		const proto = frappe.ui.form.Form.prototype;
+		if (proto.__rate_guard_installed) return;
+		proto.__rate_guard_installed = true;
+
+		const original_refresh = proto.refresh;
+		proto.refresh = function () {
+			patch_transaction_controller();
+			patch_bom_controller();
+			const out = original_refresh.apply(this, arguments);
+			setTimeout(() => hide_financial_fields(this), 0);
+			return out;
+		};
+	}
+
+	function patch_transaction_controller() {
+		const proto = window.erpnext?.TransactionController?.prototype;
+		if (!proto || proto.__rate_guard_patched) return;
+		proto.__rate_guard_patched = true;
+
+		const original_price_list_currency = proto.price_list_currency;
+		if (typeof original_price_list_currency !== "function") return;
+
+		proto.price_list_currency = function () {
+			const original_plc_conversion_rate = this.plc_conversion_rate;
+			if (typeof original_plc_conversion_rate !== "function") {
+				return original_price_list_currency.apply(this, arguments);
+			}
+
+			this.plc_conversion_rate = function (doc) {
+				return original_plc_conversion_rate.call(this, doc || this.frm?.doc || {});
+			};
+
+			try {
+				return original_price_list_currency.apply(this, arguments);
+			} finally {
+				this.plc_conversion_rate = original_plc_conversion_rate;
+			}
+		};
+	}
+
+	function patch_bom_controller() {
+		const proto = window.erpnext?.bom?.BomController?.prototype;
+		if (!proto || proto.__rate_guard_patched) return;
+		proto.__rate_guard_patched = true;
+
+		const original_plc_conversion_rate = proto.plc_conversion_rate;
+		if (typeof original_plc_conversion_rate === "function") {
+			proto.plc_conversion_rate = function (doc) {
+				return original_plc_conversion_rate.call(this, doc || this.frm?.doc || {});
+			};
+		}
+	}
+
+	frappe.after_ajax(() => {
+		patch_transaction_controller();
+		patch_bom_controller();
+		install_form_hooks();
+		if (window.cur_frm) hide_financial_fields(window.cur_frm);
+	});
+
+	$(document).on("form-refresh", function () {
+		if (window.cur_frm) hide_financial_fields(window.cur_frm);
+	});
+})();

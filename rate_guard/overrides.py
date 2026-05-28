@@ -4,12 +4,16 @@ rate_guard.overrides
 Enforces the "Allow Rate" role — pure backend, no JS required.
 
 Users WITHOUT "Allow Rate":
-  - Forms   : financial fields removed from metadata + values stripped
+  - Forms   : financial fields hidden in metadata + values stripped
   - Reports : financial columns removed entirely from response
   - API     : values never sent to browser
 
 Administrator always bypasses the restriction.
 """
+
+import copy
+import json
+from contextlib import contextmanager
 
 import frappe
 
@@ -27,7 +31,7 @@ FINANCIAL_FLOAT_KEYWORDS = frozenset([
     "overhead", "grand", "net", "gross", "outstanding",
     "valuation", "incoming_rate", "outgoing_rate", "hour_rate",
     "base_rate", "base_amount", "base_total", "base_net",
-    "base_grand", "plc_conversion",
+    "base_grand",
 ])
 
 ALWAYS_VISIBLE = frozenset([
@@ -35,7 +39,10 @@ ALWAYS_VISIBLE = frozenset([
     "received_qty", "delivered_qty", "actual_qty",
     "projected_qty", "reserved_qty", "transfer_qty",
     "conversion_factor", "uom_conversion_factor",
+    "conversion_rate", "plc_conversion_rate",
     "idx", "docstatus", "progress", "percent_complete",
+    "cost_allocation_per", "process_loss_percentage", "process_loss_per",
+    "rate_per_minute", "custom_rate_per_minute",
     "latitude", "longitude",
 ])
 
@@ -57,11 +64,11 @@ def _is_financial_field(field) -> bool:
     fn = (getattr(field, "fieldname", None) or field.get("fieldname", "") or "").lower()
     lb = (getattr(field, "label", None) or field.get("label", "") or "").lower()
 
+    if fn in ALWAYS_VISIBLE:
+        return False
     if ft in FINANCIAL_FIELDTYPES:
         return True
     if ft == "Float":
-        if fn in ALWAYS_VISIBLE:
-            return False
         for kw in FINANCIAL_FLOAT_KEYWORDS:
             if kw in fn or kw in lb:
                 return True
@@ -81,11 +88,11 @@ def _is_financial_column(col) -> bool:
     else:
         return False
 
+    if fn in ALWAYS_VISIBLE:
+        return False
     if ft in FINANCIAL_FIELDTYPES:
         return True
     if ft == "Float":
-        if fn in ALWAYS_VISIBLE:
-            return False
         for kw in FINANCIAL_FLOAT_KEYWORDS:
             if kw in fn or kw in lb:
                 return True
@@ -98,6 +105,51 @@ def _get_col_fieldname(col):
     if isinstance(col, str):
         return col.split(":")[0].strip()
     return None
+
+
+def _strip_value_financial_fields(value, doctype=None):
+    """Strip financial values from dict/list/document responses."""
+    if isinstance(value, list):
+        for row in value:
+            _strip_value_financial_fields(row, doctype=doctype)
+        return value
+
+    if isinstance(value, tuple):
+        return tuple(_strip_value_financial_fields(list(value), doctype=doctype))
+
+    if hasattr(value, "doctype") and hasattr(value, "meta"):
+        hide_rates_on_load(value)
+        return value
+
+    if not isinstance(value, dict):
+        return value
+
+    if value.get("doctype"):
+        _strip_doc_financial_fields(value)
+        return value
+
+    fields = []
+    if doctype:
+        try:
+            fields = frappe.get_meta(doctype).fields
+        except Exception:
+            fields = []
+
+    if fields:
+        for field in fields:
+            if _is_financial_field(field):
+                value[field.fieldname] = None
+
+    for key in list(value):
+        key_lower = key.lower()
+        if key_lower not in ALWAYS_VISIBLE and any(kw in key_lower for kw in FINANCIAL_FLOAT_KEYWORDS):
+            value[key] = None
+
+    for child_value in value.values():
+        if isinstance(child_value, (dict, list)):
+            _strip_value_financial_fields(child_value)
+
+    return value
 
 
 def _strip_doc_financial_fields(doc):
@@ -130,6 +182,161 @@ def _strip_doc_financial_fields(doc):
         pass
 
 
+def _hide_meta_financial_fields(meta_doc):
+    """Keep financial field definitions available to client scripts, but hide them."""
+    try:
+        fields = getattr(meta_doc, "fields", None)
+        if fields is None and isinstance(meta_doc, dict):
+            fields = meta_doc.get("fields")
+
+        for field in fields or []:
+            if not _is_financial_field(field):
+                continue
+
+            if hasattr(field, "hidden"):
+                field.hidden = 1
+                field.reqd = 0
+                field.print_hide = 1
+                field.in_list_view = 0
+                field.in_standard_filter = 0
+            elif isinstance(field, dict):
+                field["hidden"] = 1
+                field["reqd"] = 0
+                field["print_hide"] = 1
+                field["in_list_view"] = 0
+                field["in_standard_filter"] = 0
+    except Exception:
+        pass
+
+
+def _copy_and_hide_meta_financial_fields(meta_doc):
+    """Return a sanitized metadata copy without mutating Frappe's cached FormMeta."""
+    meta_doc = copy.deepcopy(meta_doc)
+    _hide_meta_financial_fields(meta_doc)
+    return meta_doc
+
+
+@contextmanager
+def _print_meta_guard():
+    """Temporarily return sanitized meta copies while rendering print formats."""
+    original_get_meta = frappe.get_meta
+    sanitized = {}
+
+    def guarded_get_meta(doctype, *args, **kwargs):
+        meta = original_get_meta(doctype, *args, **kwargs)
+        meta_doctype = getattr(meta, "name", None) or getattr(meta, "doctype", None) or str(doctype)
+
+        if meta_doctype not in sanitized:
+            sanitized[meta_doctype] = _copy_and_hide_meta_financial_fields(meta)
+
+        return sanitized[meta_doctype]
+
+    frappe.get_meta = guarded_get_meta
+    try:
+        yield
+    finally:
+        frappe.get_meta = original_get_meta
+
+
+def _sanitize_print_document(doc):
+    """Strip print values without changing the saved document."""
+    doc = copy.deepcopy(doc)
+    hide_rates_on_load(doc)
+    return doc
+
+
+def before_request():
+    """Patch the full /printview page renderer for non-Allow-Rate users."""
+    if has_allow_rate():
+        return
+
+    path = (getattr(frappe.local, "request", None) and frappe.local.request.path) or ""
+    if path.rstrip("/") != "/printview":
+        return
+
+    try:
+        import frappe.www.printview as printview
+    except Exception:
+        return
+
+    if getattr(printview, "__rate_guard_printview_patched", False):
+        return
+
+    original_get_rendered_template = printview.get_rendered_template
+    original_get_html = None
+
+    def guarded_get_rendered_template(
+        doc,
+        print_format=None,
+        meta=None,
+        no_letterhead=None,
+        letterhead=None,
+        trigger_print=False,
+        settings=None,
+    ):
+        if has_allow_rate():
+            return original_get_rendered_template(
+                doc=doc,
+                print_format=print_format,
+                meta=meta,
+                no_letterhead=no_letterhead,
+                letterhead=letterhead,
+                trigger_print=trigger_print,
+                settings=settings,
+            )
+
+        doc = _sanitize_print_document(doc)
+        if meta is not None:
+            meta = _copy_and_hide_meta_financial_fields(meta)
+
+        with _print_meta_guard():
+            return original_get_rendered_template(
+                doc=doc,
+                print_format=print_format,
+                meta=meta,
+                no_letterhead=no_letterhead,
+                letterhead=letterhead,
+                trigger_print=trigger_print,
+                settings=settings,
+            )
+
+    printview.get_rendered_template = guarded_get_rendered_template
+
+    try:
+        import frappe.utils.weasyprint as weasyprint
+        original_get_html = weasyprint.get_html
+
+        def guarded_get_html(doctype, name, print_format, letterhead=None):
+            if has_allow_rate():
+                return original_get_html(
+                    doctype=doctype,
+                    name=name,
+                    print_format=print_format,
+                    letterhead=letterhead,
+                )
+
+            doc = frappe.get_doc(doctype, name)
+            doc = _sanitize_print_document(doc)
+            with _print_meta_guard():
+                return frappe.get_print(
+                    doctype,
+                    name,
+                    print_format,
+                    doc=doc,
+                    letterhead=letterhead,
+                    no_letterhead=frappe.form_dict.no_letterhead,
+                )
+
+        weasyprint.get_html = guarded_get_html
+    except Exception:
+        pass
+
+    printview.__rate_guard_printview_patched = True
+    printview.__rate_guard_original_get_rendered_template = original_get_rendered_template
+    if original_get_html:
+        printview.__rate_guard_original_weasyprint_get_html = original_get_html
+
+
 # ---------------------------------------------------------------------------
 # Doc Event — strips values on document load (also covers REST API)
 # ---------------------------------------------------------------------------
@@ -159,8 +366,8 @@ def hide_rates_on_load(doc, method=None):
 
 
 # ---------------------------------------------------------------------------
-# Form Load Override — strips field definitions from metadata
-# so financial fields never render in the form at all
+# Form Load Override — hides field definitions in metadata
+# so financial fields do not render, while client scripts keep working
 # ---------------------------------------------------------------------------
 
 @frappe.whitelist()
@@ -169,8 +376,8 @@ def getdoc_override(doctype, name):
     Replacement for frappe.desk.form.load.getdoc
     Calls the original, then:
       1. Strips financial field VALUES from every doc in the response
-      2. Removes financial field DEFINITIONS from the doctype metadata
-         so the fields are not rendered in the form at all
+      2. Hides financial field DEFINITIONS in the doctype metadata
+         so ERPNext client scripts can still access the fields
     """
     from frappe.desk.form.load import getdoc as _original_getdoc
 
@@ -184,26 +391,69 @@ def getdoc_override(doctype, name):
     for doc in docs:
         _strip_doc_financial_fields(doc)
 
-    # 2. Remove financial field definitions from the meta inside the response
-    #    so the form never renders those columns/fields
-    for doc in docs:
+    # 2. Hide financial field definitions inside the response, but keep them
+    #    available so ERPNext client scripts can still run calculations.
+    for index, doc in enumerate(docs):
         if isinstance(doc, dict) and doc.get("doctype") == doctype:
-            # Strip from inline docfields if present
             if "fields" in doc:
-                doc["fields"] = [
-                    f for f in doc["fields"]
-                    if not _is_financial_field(f)
-                ]
+                docs[index] = _copy_and_hide_meta_financial_fields(doc)
 
     # 3. Also patch the meta stored in frappe.response if present
-    meta_docs = [d for d in docs if isinstance(d, dict)
-                 and d.get("doctype") == "DocType"]
-    for meta_doc in meta_docs:
-        if "fields" in meta_doc:
-            meta_doc["fields"] = [
-                f for f in meta_doc["fields"]
-                if not _is_financial_field(f)
-            ]
+    for index, doc in enumerate(docs):
+        if isinstance(doc, dict) and doc.get("doctype") == "DocType":
+            docs[index] = _copy_and_hide_meta_financial_fields(doc)
+
+
+@frappe.whitelist()
+def getdoctype_override(doctype, with_parent=False):
+    """
+    Replacement for frappe.desk.form.load.getdoctype.
+    Covers new documents, where getdoc/onload is not called yet.
+    """
+    from frappe.desk.form.load import getdoctype as _original_getdoctype
+
+    _original_getdoctype(doctype, with_parent=with_parent)
+
+    if has_allow_rate():
+        return
+
+    frappe.response["docs"] = [
+        _copy_and_hide_meta_financial_fields(doc)
+        for doc in frappe.response.get("docs") or []
+    ]
+
+
+@frappe.whitelist()
+def run_doc_method_override(method, docs=None, dt=None, dn=None, arg=None, args=None):
+    """
+    Replacement for frappe.handler.run_doc_method.
+    Covers whitelisted document methods such as BOM.get_bom_material_detail,
+    which can return rates while a new document is still being created.
+    """
+    from frappe.handler import run_doc_method as _original_run_doc_method
+
+    result = _original_run_doc_method(method, docs=docs, dt=dt, dn=dn, arg=arg, args=args)
+
+    if has_allow_rate():
+        return result
+
+    response_docs = frappe.response.get("docs") or []
+    for doc in response_docs:
+        if isinstance(doc, dict) and doc.get("doctype"):
+            _strip_doc_financial_fields(doc)
+
+    response_message = frappe.response.get("message")
+    if response_message is not None:
+        response_doctype = None
+        if response_docs:
+            response_doctype = getattr(response_docs[0], "doctype", None) or response_docs[0].get("doctype")
+
+        frappe.response["message"] = _strip_value_financial_fields(
+            response_message,
+            doctype=response_doctype,
+        )
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +706,77 @@ def export_listview_override(
 # ---------------------------------------------------------------------------
 
 @frappe.whitelist()
+def get_html_and_style_override(
+    doc,
+    name=None,
+    print_format=None,
+    no_letterhead=None,
+    letterhead=None,
+    trigger_print=False,
+    style=None,
+    settings=None,
+):
+    """
+    Replacement for frappe.www.printview.get_html_and_style.
+    Covers the print preview page, which renders independently from form metadata.
+    """
+    from frappe.www.printview import get_html_and_style as _original
+
+    if has_allow_rate():
+        return _original(
+            doc=doc,
+            name=name,
+            print_format=print_format,
+            no_letterhead=no_letterhead,
+            letterhead=letterhead,
+            trigger_print=trigger_print,
+            style=style,
+            settings=settings,
+        )
+
+    if isinstance(name, str):
+        document = frappe.get_lazy_doc(doc, name, check_permission=True)
+    else:
+        document = frappe.get_doc(json.loads(doc) if isinstance(doc, str) else doc, check_permission=True)
+
+    hide_rates_on_load(document)
+
+    with _print_meta_guard():
+        return _original(
+            doc=document.as_json(),
+            name=None,
+            print_format=print_format,
+            no_letterhead=no_letterhead,
+            letterhead=letterhead,
+            trigger_print=trigger_print,
+            style=style,
+            settings=settings,
+        )
+
+
+@frappe.whitelist()
+def get_rendered_raw_commands_override(doc, name=None, print_format=None):
+    """
+    Replacement for frappe.www.printview.get_rendered_raw_commands.
+    Covers raw printer formats.
+    """
+    from frappe.www.printview import get_rendered_raw_commands as _original
+
+    if has_allow_rate():
+        return _original(doc=doc, name=name, print_format=print_format)
+
+    if isinstance(name, str):
+        document = frappe.get_lazy_doc(doc, name, check_permission=True)
+    else:
+        document = frappe.get_doc(json.loads(doc) if isinstance(doc, str) else doc, check_permission=True)
+
+    hide_rates_on_load(document)
+
+    with _print_meta_guard():
+        return _original(doc=document.as_json(), name=None, print_format=print_format)
+
+
+@frappe.whitelist()
 def report_to_pdf_override(html, orientation="Landscape"):
     """
     Replacement for frappe.utils.print_format.report_to_pdf
@@ -490,14 +811,13 @@ def download_pdf_override(doctype, name, format=None, doc=None, no_letterhead=0,
     _doc = frappe.get_doc(doctype, name)
     hide_rates_on_load(_doc)
 
-    return _original(
-        doctype=doctype,
-        name=name,
-        format=format,
-        doc=_doc,
-        no_letterhead=no_letterhead,
-        language=language,
-        letterhead=letterhead,
-    )
-
-
+    with _print_meta_guard():
+        return _original(
+            doctype=doctype,
+            name=name,
+            format=format,
+            doc=_doc,
+            no_letterhead=no_letterhead,
+            language=language,
+            letterhead=letterhead,
+        )
