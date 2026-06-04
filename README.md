@@ -77,6 +77,25 @@ transaction values:
 - Purchase Invoice
 - Purchase Invoice Item
 
+## Excluded reports
+
+These reports are not protected by Rate Guard. Edit `EXCLUDED_REPORTS` in
+`rate_guard/overrides.py` to add or remove report names:
+
+- Sales Register
+- Purchase Register
+- Sales Order Analysis
+- Purchase Order Analysis
+- Sales Order Trends
+- Purchase Order Trends
+- Sales Invoice Trends
+- Purchase Invoice Trends
+- Item-wise Sales Register
+- Item-wise Purchase Register
+- Ordered Items To Be Delivered
+- Delivered Items To Be Billed
+- Received Items To Be Billed
+
 ---
 
 ## Customising which fields are protected
@@ -87,6 +106,7 @@ Edit `rate_guard/overrides.py`:
 - `FINANCIAL_FLOAT_KEYWORDS` — add keywords for Float field names/labels
 - `ALWAYS_VISIBLE` — add fieldnames that should never be hidden
 - `EXCLUDED_DOCTYPES` — add doctypes where Rate Guard should not apply
+- `EXCLUDED_REPORTS` — add reports where Rate Guard should not apply
 
 ---
 

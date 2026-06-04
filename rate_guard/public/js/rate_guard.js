@@ -136,8 +136,50 @@
 		grid.update_docfield_property(child_df.fieldname, "in_standard_filter", 0);
 	}
 
-	function hide_financial_fields(frm) {
-		if (!frm || !should_apply_rate_guard(frm.doctype) || frm.__rate_guard_applying) return;
+	function show_excluded_financial_fields(frm) {
+		if (!frm || !EXCLUDED_DOCTYPES.has(frm.doctype)) return;
+
+		(frm.meta?.fields || []).forEach((df) => {
+			if (is_financial_field(df)) {
+				df.hidden = 0;
+				frm.set_df_property(df.fieldname, "hidden", 0);
+			} else if (
+				(frappe.model.table_fields || []).includes(df.fieldtype) &&
+				frm.fields_dict[df.fieldname]?.grid &&
+				EXCLUDED_DOCTYPES.has(df.options)
+			) {
+				const grid = frm.fields_dict[df.fieldname].grid;
+				const child_meta = frappe.get_meta(df.options);
+
+				(child_meta?.fields || []).forEach((child_df) => {
+					if (!is_financial_field(child_df)) return;
+
+					child_df.hidden = 0;
+					child_df.in_list_view = 1;
+
+					const mapped_df = frappe.meta?.docfield_map?.[df.options]?.[child_df.fieldname];
+					if (mapped_df) {
+						mapped_df.hidden = 0;
+						mapped_df.in_list_view = 1;
+					}
+
+					grid.update_docfield_property(child_df.fieldname, "hidden", 0);
+					grid.update_docfield_property(child_df.fieldname, "in_list_view", 1);
+				});
+
+				grid.refresh();
+			}
+		});
+	}
+
+	function apply_rate_guard_to_form(frm) {
+		if (!frm || frm.__rate_guard_applying) return;
+
+		if (!should_apply_rate_guard(frm.doctype)) {
+			show_excluded_financial_fields(frm);
+			return;
+		}
+
 		frm.__rate_guard_applying = true;
 
 		try {
@@ -178,7 +220,7 @@
 			patch_transaction_controller();
 			patch_bom_controller();
 			const out = original_refresh.apply(this, arguments);
-			setTimeout(() => hide_financial_fields(this), 0);
+			setTimeout(() => apply_rate_guard_to_form(this), 0);
 			return out;
 		};
 	}
@@ -226,10 +268,10 @@
 		patch_transaction_controller();
 		patch_bom_controller();
 		install_form_hooks();
-		if (window.cur_frm) hide_financial_fields(window.cur_frm);
+		if (window.cur_frm) apply_rate_guard_to_form(window.cur_frm);
 	});
 
 	$(document).on("form-refresh", function () {
-		if (window.cur_frm) hide_financial_fields(window.cur_frm);
+		if (window.cur_frm) apply_rate_guard_to_form(window.cur_frm);
 	});
 })();

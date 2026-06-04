@@ -59,6 +59,22 @@ EXCLUDED_DOCTYPES = frozenset([
     "Purchase Invoice Item",
 ])
 
+EXCLUDED_REPORTS = frozenset([
+    "Sales Register",
+    "Purchase Register",
+    "Sales Order Analysis",
+    "Purchase Order Analysis",
+    "Sales Order Trends",
+    "Purchase Order Trends",
+    "Sales Invoice Trends",
+    "Purchase Invoice Trends",
+    "Item-wise Sales Register",
+    "Item-wise Purchase Register",
+    "Ordered Items To Be Delivered",
+    "Delivered Items To Be Billed",
+    "Received Items To Be Billed",
+])
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -76,6 +92,55 @@ def should_apply_rate_guard(doctype=None, parent_doctype=None) -> bool:
     if has_allow_rate():
         return False
     return doctype not in EXCLUDED_DOCTYPES and parent_doctype not in EXCLUDED_DOCTYPES
+
+
+def should_apply_rate_guard_to_report(report_name=None) -> bool:
+    if has_allow_rate():
+        return False
+    return report_name not in EXCLUDED_REPORTS
+
+
+def _loads_json(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
+
+
+def _collect_doctypes(value):
+    value = _loads_json(value)
+    doctypes = set()
+
+    if isinstance(value, list):
+        for row in value:
+            doctypes.update(_collect_doctypes(row))
+        return doctypes
+
+    if not isinstance(value, dict):
+        return doctypes
+
+    doctype = value.get("doctype")
+    parenttype = value.get("parenttype")
+    if doctype:
+        doctypes.add(doctype)
+    if parenttype:
+        doctypes.add(parenttype)
+
+    for child_value in value.values():
+        if isinstance(child_value, (dict, list)):
+            doctypes.update(_collect_doctypes(child_value))
+
+    return doctypes
+
+
+def _has_excluded_doctype_context(*values):
+    doctypes = set()
+    for value in values:
+        doctypes.update(_collect_doctypes(value))
+
+    return bool(doctypes.intersection(EXCLUDED_DOCTYPES))
 
 
 def _is_financial_field(field) -> bool:
@@ -467,7 +532,7 @@ def run_doc_method_override(method, docs=None, dt=None, dn=None, arg=None, args=
 
     result = _original_run_doc_method(method, docs=docs, dt=dt, dn=dn, arg=arg, args=args)
 
-    if not should_apply_rate_guard(dt):
+    if not should_apply_rate_guard(dt) or _has_excluded_doctype_context(docs, arg, args):
         return result
 
     response_docs = frappe.response.get("docs") or []
@@ -521,7 +586,7 @@ def run_report_override(
         parent_field=parent_field,
     )
 
-    if not should_apply_rate_guard():
+    if not should_apply_rate_guard_to_report(report_name):
         return result
 
     _remove_financial_columns(result)
@@ -588,14 +653,14 @@ def export_query_report_override(**kwargs):
     valid_args = set(inspect.signature(_original).parameters.keys())
     clean_kwargs = {k: v for k, v in frappe.form_dict.items() if k in valid_args}
 
-    if not should_apply_rate_guard():
+    report_name = frappe.form_dict.get("report_name")
+    if not should_apply_rate_guard_to_report(report_name):
         return _original(**clean_kwargs)
 
     # Non-Allow-Rate: generate our own stripped export
     try:
         from frappe.desk.query_report import generate_report_result, get_report_doc
 
-        report_name    = frappe.form_dict.get("report_name")
         filters        = frappe.form_dict.get("filters") or {}
         custom_columns = frappe.form_dict.get("custom_columns")
         file_format    = frappe.form_dict.get("file_format_type", "Excel")
