@@ -104,7 +104,56 @@
 		return false;
 	}
 
+	function remember_original_field_state(df) {
+		if (!df || df.__rate_guard_original_state) return;
+
+		df.__rate_guard_original_state = {
+			hidden: df.hidden,
+			reqd: df.reqd,
+			in_list_view: df.in_list_view,
+			in_standard_filter: df.in_standard_filter,
+		};
+	}
+
+	function restore_original_field_state(df) {
+		const original = df?.__rate_guard_original_state;
+		if (!original) return;
+
+		df.hidden = original.hidden;
+		df.reqd = original.reqd;
+		df.in_list_view = original.in_list_view;
+		df.in_standard_filter = original.in_standard_filter;
+		delete df.__rate_guard_original_state;
+	}
+
+	function restore_rate_guard_changes(frm) {
+		if (!frm) return;
+
+		(frm.meta?.fields || []).forEach((df) => {
+			restore_original_field_state(df);
+
+			if (
+				(frappe.model.table_fields || []).includes(df.fieldtype) &&
+				frm.fields_dict[df.fieldname]?.grid
+			) {
+				const grid = frm.fields_dict[df.fieldname].grid;
+				const child_meta = frappe.get_meta(df.options);
+
+				(child_meta?.fields || []).forEach((child_df) => {
+					const mapped_df = frappe.meta?.docfield_map?.[df.options]?.[child_df.fieldname];
+
+					restore_original_field_state(child_df);
+					restore_original_field_state(mapped_df);
+				});
+
+				grid.refresh();
+			}
+		});
+	}
+
 	function hide_field_without_client_mandatory(frm, df) {
+		remember_original_field_state(df);
+
 		df.hidden = 1;
 		df.reqd = 0;
 		df.in_list_view = 0;
@@ -117,6 +166,8 @@
 	}
 
 	function hide_grid_field_without_client_mandatory(grid, child_doctype, child_df) {
+		remember_original_field_state(child_df);
+
 		child_df.hidden = 1;
 		child_df.reqd = 0;
 		child_df.in_list_view = 0;
@@ -124,6 +175,8 @@
 
 		const mapped_df = frappe.meta?.docfield_map?.[child_doctype]?.[child_df.fieldname];
 		if (mapped_df) {
+			remember_original_field_state(mapped_df);
+
 			mapped_df.hidden = 1;
 			mapped_df.reqd = 0;
 			mapped_df.in_list_view = 0;
@@ -136,44 +189,10 @@
 		grid.update_docfield_property(child_df.fieldname, "in_standard_filter", 0);
 	}
 
-	function show_excluded_financial_fields(frm) {
-		if (!frm || !EXCLUDED_DOCTYPES.has(frm.doctype)) return;
-
-		(frm.meta?.fields || []).forEach((df) => {
-			if (is_financial_field(df)) {
-				df.hidden = 0;
-				frm.set_df_property(df.fieldname, "hidden", 0);
-			} else if (
-				(frappe.model.table_fields || []).includes(df.fieldtype) &&
-				frm.fields_dict[df.fieldname]?.grid &&
-				EXCLUDED_DOCTYPES.has(df.options)
-			) {
-				const grid = frm.fields_dict[df.fieldname].grid;
-				const child_meta = frappe.get_meta(df.options);
-
-				(child_meta?.fields || []).forEach((child_df) => {
-					if (!is_financial_field(child_df)) return;
-
-					child_df.hidden = 0;
-
-					const mapped_df = frappe.meta?.docfield_map?.[df.options]?.[child_df.fieldname];
-					if (mapped_df) {
-						mapped_df.hidden = 0;
-					}
-
-					grid.update_docfield_property(child_df.fieldname, "hidden", 0);
-				});
-
-				grid.refresh();
-			}
-		});
-	}
-
 	function apply_rate_guard_to_form(frm) {
 		if (!frm || frm.__rate_guard_applying) return;
-
 		if (!should_apply_rate_guard(frm.doctype)) {
-			show_excluded_financial_fields(frm);
+			restore_rate_guard_changes(frm);
 			return;
 		}
 
