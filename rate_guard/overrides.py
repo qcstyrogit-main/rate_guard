@@ -234,6 +234,85 @@ def reset_excluded_transaction_grid_settings():
     }
 
 
+def diagnose_transaction_grid_settings():
+    """Return user GridView overrides and metadata customizations for excluded transactions."""
+    from frappe.model.utils.user_settings import sync_user_settings
+
+    sync_user_settings()
+
+    user_settings = []
+    rows = frappe.db.sql(
+        """
+        select user, doctype, data
+        from `__UserSettings`
+        where doctype in %(doctypes)s
+        """,
+        {"doctypes": tuple(EXCLUDED_GRID_PARENT_DOCTYPES)},
+        as_dict=True,
+    )
+
+    for row in rows:
+        try:
+            data = json.loads(row.data or "{}")
+        except Exception:
+            continue
+
+        grid_view = data.get("GridView")
+        if not isinstance(grid_view, dict):
+            continue
+
+        for child_doctype, columns in grid_view.items():
+            if child_doctype not in EXCLUDED_DOCTYPES or not isinstance(columns, list):
+                continue
+
+            user_settings.append({
+                "user": row.user,
+                "parent_doctype": row.doctype,
+                "child_doctype": child_doctype,
+                "column_count": len(columns),
+                "columns": [column.get("fieldname") for column in columns if isinstance(column, dict)],
+            })
+
+    property_setters = frappe.db.sql(
+        """
+        select doc_type, field_name, property, value
+        from `tabProperty Setter`
+        where doc_type in %(doctypes)s
+          and property in ('hidden', 'in_list_view', 'columns', 'colsize')
+        order by doc_type, field_name, property
+        """,
+        {"doctypes": tuple(EXCLUDED_DOCTYPES)},
+        as_dict=True,
+    )
+
+    docfield_overrides = []
+    for doctype in sorted(EXCLUDED_DOCTYPES):
+        try:
+            meta = frappe.get_meta(doctype)
+        except Exception:
+            continue
+
+        for field in meta.fields:
+            if _is_financial_field(field) and (field.hidden or field.in_list_view):
+                docfield_overrides.append({
+                    "doctype": doctype,
+                    "fieldname": field.fieldname,
+                    "label": field.label,
+                    "hidden": field.hidden,
+                    "in_list_view": field.in_list_view,
+                    "columns": getattr(field, "columns", None),
+                })
+
+    return {
+        "user_grid_settings": user_settings,
+        "user_grid_settings_count": len(user_settings),
+        "property_setters": property_setters,
+        "property_setters_count": len(property_setters),
+        "financial_docfields_marked_hidden_or_in_list": docfield_overrides,
+        "financial_docfields_marked_hidden_or_in_list_count": len(docfield_overrides),
+    }
+
+
 def _is_financial_field(field) -> bool:
     ft = getattr(field, "fieldtype", None) or field.get("fieldtype", "")
     fn = (getattr(field, "fieldname", None) or field.get("fieldname", "") or "").lower()
