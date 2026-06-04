@@ -155,16 +155,13 @@
 					if (!is_financial_field(child_df)) return;
 
 					child_df.hidden = 0;
-					child_df.in_list_view = 1;
 
 					const mapped_df = frappe.meta?.docfield_map?.[df.options]?.[child_df.fieldname];
 					if (mapped_df) {
 						mapped_df.hidden = 0;
-						mapped_df.in_list_view = 1;
 					}
 
 					grid.update_docfield_property(child_df.fieldname, "hidden", 0);
-					grid.update_docfield_property(child_df.fieldname, "in_list_view", 1);
 				});
 
 				grid.refresh();
