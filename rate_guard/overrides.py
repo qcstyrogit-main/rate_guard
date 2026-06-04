@@ -75,6 +75,14 @@ EXCLUDED_REPORTS = frozenset([
     "Received Items To Be Billed",
 ])
 
+EXCLUDED_GRID_PARENT_DOCTYPES = frozenset([
+    "Sales Order",
+    "Purchase Receipt",
+    "Purchase Order",
+    "Sales Invoice",
+    "Purchase Invoice",
+])
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -141,6 +149,89 @@ def _has_excluded_doctype_context(*values):
         doctypes.update(_collect_doctypes(value))
 
     return bool(doctypes.intersection(EXCLUDED_DOCTYPES))
+
+
+def reset_excluded_transaction_grid_settings():
+    """
+    Remove per-user grid column overrides for excluded transaction doctypes.
+
+    This repairs users who saved Configure Columns while older Rate Guard
+    browser metadata had marked extra rate/amount fields as grid columns.
+    """
+    from frappe.model.utils.user_settings import sync_user_settings
+
+    sync_user_settings()
+
+    rows = frappe.db.sql(
+        """
+        select user, doctype, data
+        from `__UserSettings`
+        where doctype in %(doctypes)s
+        """,
+        {"doctypes": tuple(EXCLUDED_GRID_PARENT_DOCTYPES)},
+        as_dict=True,
+    )
+
+    updated = []
+    deleted = []
+
+    for row in rows:
+        try:
+            data = json.loads(row.data or "{}")
+        except Exception:
+            continue
+
+        grid_view = data.get("GridView")
+        if not isinstance(grid_view, dict):
+            continue
+
+        changed = False
+        for child_doctype in list(grid_view):
+            if child_doctype in EXCLUDED_DOCTYPES:
+                grid_view.pop(child_doctype, None)
+                changed = True
+
+        if not changed:
+            continue
+
+        if grid_view:
+            data["GridView"] = grid_view
+        else:
+            data.pop("GridView", None)
+
+        if data:
+            frappe.db.sql(
+                """
+                update `__UserSettings`
+                set data = %(data)s
+                where user = %(user)s and doctype = %(doctype)s
+                """,
+                {
+                    "data": json.dumps(data),
+                    "user": row.user,
+                    "doctype": row.doctype,
+                },
+            )
+            updated.append({"user": row.user, "doctype": row.doctype})
+        else:
+            frappe.db.sql(
+                """
+                delete from `__UserSettings`
+                where user = %(user)s and doctype = %(doctype)s
+                """,
+                {"user": row.user, "doctype": row.doctype},
+            )
+            deleted.append({"user": row.user, "doctype": row.doctype})
+
+        frappe.cache.hdel("_user_settings", f"{row.doctype}::{row.user}")
+
+    frappe.db.commit()
+
+    return {
+        "updated": updated,
+        "deleted": deleted,
+        "total": len(updated) + len(deleted),
+    }
 
 
 def _is_financial_field(field) -> bool:
