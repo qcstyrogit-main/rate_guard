@@ -67,9 +67,25 @@
 		"latitude",
 		"longitude",
 	]);
+	const EXCLUDED_DOCTYPES = new Set([
+		"Sales Order",
+		"Sales Order Item",
+		"Purchase Receipt",
+		"Purchase Receipt Item",
+		"Purchase Order",
+		"Purchase Order Item",
+		"Sales Invoice",
+		"Sales Invoice Item",
+		"Purchase Invoice",
+		"Purchase Invoice Item",
+	]);
 
 	function has_allow_rate() {
 		return frappe.session?.user === "Administrator" || (frappe.user_roles || []).includes("Allow Rate");
+	}
+
+	function should_apply_rate_guard(doctype) {
+		return !has_allow_rate() && !EXCLUDED_DOCTYPES.has(doctype);
 	}
 
 	function is_financial_field(df) {
@@ -121,7 +137,7 @@
 	}
 
 	function hide_financial_fields(frm) {
-		if (!frm || has_allow_rate() || frm.__rate_guard_applying) return;
+		if (!frm || !should_apply_rate_guard(frm.doctype) || frm.__rate_guard_applying) return;
 		frm.__rate_guard_applying = true;
 
 		try {
@@ -134,6 +150,7 @@
 				) {
 					const grid = frm.fields_dict[df.fieldname].grid;
 					const child_meta = frappe.get_meta(df.options);
+					if (!should_apply_rate_guard(df.options)) return;
 
 					(child_meta?.fields || []).forEach((child_df) => {
 						if (!is_financial_field(child_df)) return;

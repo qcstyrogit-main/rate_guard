@@ -46,6 +46,19 @@ ALWAYS_VISIBLE = frozenset([
     "latitude", "longitude",
 ])
 
+EXCLUDED_DOCTYPES = frozenset([
+    "Sales Order",
+    "Sales Order Item",
+    "Purchase Receipt",
+    "Purchase Receipt Item",
+    "Purchase Order",
+    "Purchase Order Item",
+    "Sales Invoice",
+    "Sales Invoice Item",
+    "Purchase Invoice",
+    "Purchase Invoice Item",
+])
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -57,6 +70,12 @@ def has_allow_rate() -> bool:
     if user == "Guest":
         return False
     return "Allow Rate" in frappe.get_roles(user)
+
+
+def should_apply_rate_guard(doctype=None, parent_doctype=None) -> bool:
+    if has_allow_rate():
+        return False
+    return doctype not in EXCLUDED_DOCTYPES and parent_doctype not in EXCLUDED_DOCTYPES
 
 
 def _is_financial_field(field) -> bool:
@@ -109,6 +128,9 @@ def _get_col_fieldname(col):
 
 def _strip_value_financial_fields(value, doctype=None):
     """Strip financial values from dict/list/document responses."""
+    if not should_apply_rate_guard(doctype):
+        return value
+
     if isinstance(value, list):
         for row in value:
             _strip_value_financial_fields(row, doctype=doctype)
@@ -125,6 +147,8 @@ def _strip_value_financial_fields(value, doctype=None):
         return value
 
     if value.get("doctype"):
+        if not should_apply_rate_guard(value.get("doctype")):
+            return value
         _strip_doc_financial_fields(value)
         return value
 
@@ -157,7 +181,7 @@ def _strip_doc_financial_fields(doc):
     if not isinstance(doc, dict):
         return
     doctype = doc.get("doctype", "")
-    if not doctype:
+    if not doctype or not should_apply_rate_guard(doctype):
         return
     try:
         meta = frappe.get_meta(doctype)
@@ -185,6 +209,15 @@ def _strip_doc_financial_fields(doc):
 def _hide_meta_financial_fields(meta_doc):
     """Keep financial field definitions available to client scripts, but hide them."""
     try:
+        meta_doctype = (
+            getattr(meta_doc, "name", None)
+            or getattr(meta_doc, "doctype", None)
+            or (meta_doc.get("name") if isinstance(meta_doc, dict) else None)
+            or (meta_doc.get("doctype") if isinstance(meta_doc, dict) else None)
+        )
+        if not should_apply_rate_guard(meta_doctype):
+            return
+
         fields = getattr(meta_doc, "fields", None)
         if fields is None and isinstance(meta_doc, dict):
             fields = meta_doc.get("fields")
@@ -247,7 +280,7 @@ def _sanitize_print_document(doc):
 
 def before_request():
     """Patch the full /printview page renderer for non-Allow-Rate users."""
-    if has_allow_rate():
+    if not should_apply_rate_guard():
         return
 
     path = (getattr(frappe.local, "request", None) and frappe.local.request.path) or ""
@@ -274,7 +307,7 @@ def before_request():
         trigger_print=False,
         settings=None,
     ):
-        if has_allow_rate():
+        if not should_apply_rate_guard(getattr(doc, "doctype", None)):
             return original_get_rendered_template(
                 doc=doc,
                 print_format=print_format,
@@ -307,7 +340,7 @@ def before_request():
         original_get_html = weasyprint.get_html
 
         def guarded_get_html(doctype, name, print_format, letterhead=None):
-            if has_allow_rate():
+            if not should_apply_rate_guard(doctype):
                 return original_get_html(
                     doctype=doctype,
                     name=name,
@@ -343,7 +376,7 @@ def before_request():
 
 def hide_rates_on_load(doc, method=None):
     try:
-        if has_allow_rate():
+        if not should_apply_rate_guard(getattr(doc, "doctype", None)):
             return
         meta = frappe.get_meta(doc.doctype)
         for field in meta.fields:
@@ -383,7 +416,7 @@ def getdoc_override(doctype, name):
 
     _original_getdoc(doctype, name)
 
-    if has_allow_rate():
+    if not should_apply_rate_guard(doctype):
         return
 
     # 1. Strip values from docs in the response
@@ -414,7 +447,7 @@ def getdoctype_override(doctype, with_parent=False):
 
     _original_getdoctype(doctype, with_parent=with_parent)
 
-    if has_allow_rate():
+    if not should_apply_rate_guard(doctype):
         return
 
     frappe.response["docs"] = [
@@ -434,7 +467,7 @@ def run_doc_method_override(method, docs=None, dt=None, dn=None, arg=None, args=
 
     result = _original_run_doc_method(method, docs=docs, dt=dt, dn=dn, arg=arg, args=args)
 
-    if has_allow_rate():
+    if not should_apply_rate_guard(dt):
         return result
 
     response_docs = frappe.response.get("docs") or []
@@ -488,7 +521,7 @@ def run_report_override(
         parent_field=parent_field,
     )
 
-    if has_allow_rate():
+    if not should_apply_rate_guard():
         return result
 
     _remove_financial_columns(result)
@@ -555,7 +588,7 @@ def export_query_report_override(**kwargs):
     valid_args = set(inspect.signature(_original).parameters.keys())
     clean_kwargs = {k: v for k, v in frappe.form_dict.items() if k in valid_args}
 
-    if has_allow_rate():
+    if not should_apply_rate_guard():
         return _original(**clean_kwargs)
 
     # Non-Allow-Rate: generate our own stripped export
@@ -644,7 +677,7 @@ def export_listview_override(
     """
     from frappe.desk.reportview import export_query as _original
 
-    if has_allow_rate():
+    if not should_apply_rate_guard(doctype, parent_doctype):
         return _original(
             doctype=doctype,
             parent_doctype=parent_doctype,
@@ -722,7 +755,7 @@ def get_html_and_style_override(
     """
     from frappe.www.printview import get_html_and_style as _original
 
-    if has_allow_rate():
+    if not should_apply_rate_guard(doc):
         return _original(
             doc=doc,
             name=name,
@@ -762,7 +795,7 @@ def get_rendered_raw_commands_override(doc, name=None, print_format=None):
     """
     from frappe.www.printview import get_rendered_raw_commands as _original
 
-    if has_allow_rate():
+    if not should_apply_rate_guard(doc):
         return _original(doc=doc, name=name, print_format=print_format)
 
     if isinstance(name, str):
@@ -796,7 +829,7 @@ def download_pdf_override(doctype, name, format=None, doc=None, no_letterhead=0,
     """
     from frappe.utils.print_format import download_pdf as _original
 
-    if has_allow_rate():
+    if not should_apply_rate_guard(doctype):
         return _original(
             doctype=doctype,
             name=name,

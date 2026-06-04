@@ -1,6 +1,7 @@
 # Rate Guard
 
-Enforces the **Allow Rate** role across all ERPNext doctypes, reports, and APIs.
+Enforces the **Allow Rate** role across ERPNext doctypes, reports, and APIs,
+except for configured regular transaction doctypes.
 
 Users **without** the `Allow Rate` role will receive blank / None values for all
 Currency, Percent, and financial Float fields — server-side, before data reaches
@@ -60,6 +61,22 @@ Go to **ERPNext → User → (select user) → Roles** and add **Allow Rate**.
 Users with this role see all figures normally.
 Users without this role see blank for all financial fields.
 
+## Excluded regular transactions
+
+These doctypes are not protected by Rate Guard, so users can view the normal
+transaction values:
+
+- Sales Order
+- Sales Order Item
+- Purchase Receipt
+- Purchase Receipt Item
+- Purchase Order
+- Purchase Order Item
+- Sales Invoice
+- Sales Invoice Item
+- Purchase Invoice
+- Purchase Invoice Item
+
 ---
 
 ## Customising which fields are protected
@@ -69,6 +86,7 @@ Edit `rate_guard/overrides.py`:
 - `FINANCIAL_FIELDTYPES` — add fieldtypes to always hide
 - `FINANCIAL_FLOAT_KEYWORDS` — add keywords for Float field names/labels
 - `ALWAYS_VISIBLE` — add fieldnames that should never be hidden
+- `EXCLUDED_DOCTYPES` — add doctypes where Rate Guard should not apply
 
 ---
 
