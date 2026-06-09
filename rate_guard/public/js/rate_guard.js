@@ -112,6 +112,13 @@
 		}
 	}
 
+	function get_child_financial_fieldnames(child_doctype) {
+		return as_array(get_meta_safe(child_doctype)?.fields)
+			.filter(is_financial_field)
+			.map((df) => df.fieldname)
+			.filter(Boolean);
+	}
+
 	function has_allow_rate() {
 		return frappe.session?.user === "Administrator" || (frappe.user_roles || []).includes("Allow Rate");
 	}
@@ -246,6 +253,31 @@
 		}
 	}
 
+	function scrub_grid_financial_values(grid, child_doctype) {
+		if (!grid || !should_apply_rate_guard(child_doctype)) return;
+
+		const fieldnames = get_child_financial_fieldnames(child_doctype);
+		if (!fieldnames.length) return;
+
+		const rows = as_array(grid.data).concat(as_array(grid.grid_rows).map((row) => row?.doc));
+		rows.forEach((row) => {
+			if (!row) return;
+			fieldnames.forEach((fieldname) => {
+				if (Object.prototype.hasOwnProperty.call(row, fieldname)) {
+					row[fieldname] = null;
+				}
+			});
+		});
+	}
+
+	function scrub_grid(grid) {
+		const child_doctype = grid?.doctype;
+		if (!child_doctype || !should_apply_rate_guard(child_doctype)) return;
+
+		scrub_grid_financial_columns(grid, child_doctype);
+		scrub_grid_financial_values(grid, child_doctype);
+	}
+
 	function apply_rate_guard_to_form(frm) {
 		if (!frm || frm.__rate_guard_applying) return;
 		if (!should_apply_rate_guard(frm.doctype)) {
@@ -271,7 +303,7 @@
 						hide_grid_field_without_client_mandatory(grid, df.options, child_df);
 					});
 
-					scrub_grid_financial_columns(grid, df.options);
+					scrub_grid(grid);
 					call_if_function(grid, "refresh");
 				}
 			});
@@ -295,6 +327,68 @@
 			setTimeout(() => apply_rate_guard_to_form(this), 0);
 			return out;
 		};
+	}
+
+	function install_grid_hooks() {
+		if (has_allow_rate()) return;
+
+		const grid_proto = frappe.ui?.form?.Grid?.prototype;
+		if (grid_proto && !grid_proto.__rate_guard_installed) {
+			grid_proto.__rate_guard_installed = true;
+
+			const original_setup_visible_columns = grid_proto.setup_visible_columns;
+			if (typeof original_setup_visible_columns === "function") {
+				grid_proto.setup_visible_columns = function () {
+					const had_visible_columns = Array.isArray(this.visible_columns) && this.visible_columns.length > 0;
+					const out = original_setup_visible_columns.apply(this, arguments);
+
+					if (should_apply_rate_guard(this.doctype)) {
+						scrub_grid(this);
+						if (had_visible_columns) {
+							scrub_grid_financial_columns(this, this.doctype);
+						}
+					}
+
+					return out;
+				};
+			}
+
+			const original_setup_user_defined_columns = grid_proto.setup_user_defined_columns;
+			if (typeof original_setup_user_defined_columns === "function") {
+				grid_proto.setup_user_defined_columns = function () {
+					const out = original_setup_user_defined_columns.apply(this, arguments);
+					scrub_grid_financial_columns(this, this.doctype);
+					return out;
+				};
+			}
+
+			const original_refresh = grid_proto.refresh;
+			if (typeof original_refresh === "function") {
+				grid_proto.refresh = function () {
+					if (should_apply_rate_guard(this.doctype)) {
+						this.visible_columns = [];
+						scrub_grid_financial_values(this, this.doctype);
+					}
+
+					const out = original_refresh.apply(this, arguments);
+					scrub_grid(this);
+					return out;
+				};
+			}
+		}
+
+		const grid_row_proto = frappe.ui?.form?.GridRow?.prototype;
+		if (grid_row_proto && !grid_row_proto.__rate_guard_installed) {
+			grid_row_proto.__rate_guard_installed = true;
+
+			const original_setup_columns = grid_row_proto.setup_columns;
+			if (typeof original_setup_columns === "function") {
+				grid_row_proto.setup_columns = function () {
+					scrub_grid(this.grid);
+					return original_setup_columns.apply(this, arguments);
+				};
+			}
+		}
 	}
 
 	function install_list_hooks() {
@@ -398,6 +492,7 @@
 		patch_transaction_controller();
 		patch_bom_controller();
 		install_form_hooks();
+		install_grid_hooks();
 		install_list_hooks();
 		if (window.cur_frm) apply_rate_guard_to_form(window.cur_frm);
 	}

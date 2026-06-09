@@ -8,7 +8,7 @@ app_color       = "red"
 app_email       = ""
 app_license     = "MIT"
 
-app_include_js = "/assets/rate_guard/js/rate_guard.js?v=20260609.2"
+app_include_js = "/assets/rate_guard/js/rate_guard.js?v=20260609.3"
 
 before_request = ["rate_guard.overrides.before_request"]
 
