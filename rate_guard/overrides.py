@@ -353,12 +353,141 @@ def _is_financial_column(col) -> bool:
     return False
 
 
+def _get_financial_fieldnames(doctype):
+    try:
+        meta = frappe.get_meta(doctype)
+    except Exception:
+        return set()
+
+    return {field.fieldname for field in meta.fields if _is_financial_field(field)}
+
+
 def _get_col_fieldname(col):
     if isinstance(col, dict):
         return col.get("fieldname") or col.get("key")
     if isinstance(col, str):
         return col.split(":")[0].strip()
     return None
+
+
+def _normalize_requested_fieldname(field):
+    if isinstance(field, dict):
+        return field.get("fieldname") or field.get("field") or field.get("key")
+    if not isinstance(field, str):
+        return None
+
+    field = field.strip()
+    lower_field = field.lower()
+    if " as " in lower_field:
+        field = field[:lower_field.rfind(" as ")].strip()
+    if "." in field:
+        field = field.split(".")[-1]
+    return field.strip("`\" ")
+
+
+def _is_financial_requested_field(field, doctype):
+    fieldname = _normalize_requested_fieldname(field)
+    if not fieldname:
+        return False
+
+    try:
+        df = frappe.get_meta(doctype).get_field(fieldname)
+    except Exception:
+        df = None
+
+    if df:
+        return _is_financial_field(df)
+
+    fieldname = fieldname.lower()
+    if fieldname in ALWAYS_VISIBLE:
+        return False
+    return any(kw in fieldname for kw in FINANCIAL_FLOAT_KEYWORDS)
+
+
+def _strip_financial_reportview_keys(data, doctype):
+    financial_fieldnames = _get_financial_fieldnames(doctype)
+    if not financial_fieldnames:
+        return data
+
+    if isinstance(data, dict) and isinstance(data.get("keys"), list):
+        keep_indexes = [
+            i for i, key in enumerate(data["keys"])
+            if _normalize_requested_fieldname(key) not in financial_fieldnames
+        ]
+        data["keys"] = [data["keys"][i] for i in keep_indexes]
+        data["values"] = [
+            [row[i] for i in keep_indexes if i < len(row)]
+            for row in data.get("values") or []
+        ]
+        return data
+
+    if isinstance(data, list):
+        for row in data:
+            if isinstance(row, dict):
+                for fieldname in financial_fieldnames:
+                    row.pop(fieldname, None)
+
+    return data
+
+
+def _strip_financial_fields_from_reportview_form_dict(doctype, parent_doctype=None):
+    if not should_apply_rate_guard(doctype, parent_doctype):
+        return
+
+    form_dict = frappe.local.form_dict
+
+    fields = _loads_json(form_dict.get("fields"))
+    if isinstance(fields, list):
+        form_dict["fields"] = json.dumps([
+            field for field in fields
+            if not _is_financial_requested_field(field, doctype)
+        ])
+
+    for key in ("filters", "or_filters"):
+        filters = _loads_json(form_dict.get(key))
+        clean_filters = _strip_financial_filters(filters, doctype)
+        if clean_filters != filters:
+            form_dict[key] = json.dumps(clean_filters)
+
+    order_by = form_dict.get("order_by")
+    if order_by and _is_financial_requested_field(str(order_by).split()[0], doctype):
+        form_dict.pop("order_by", None)
+
+    group_by = form_dict.get("group_by")
+    if group_by and _is_financial_requested_field(str(group_by).split()[0], doctype):
+        form_dict.pop("group_by", None)
+
+    if _is_financial_requested_field(form_dict.get("aggregate_on_field"), doctype):
+        for key in ("aggregate_on_field", "aggregate_on_doctype", "aggregate_function"):
+            form_dict.pop(key, None)
+
+
+def _strip_financial_filters(filters, doctype):
+    if isinstance(filters, dict):
+        return {
+            key: value for key, value in filters.items()
+            if not _is_financial_requested_field(key, doctype)
+        }
+
+    if not isinstance(filters, list):
+        return filters
+
+    clean_filters = []
+    for condition in filters:
+        if not isinstance(condition, list):
+            clean_filters.append(condition)
+            continue
+
+        fieldname = condition[0] if len(condition) == 3 else condition[1] if len(condition) >= 4 else None
+        condition_doctype = doctype
+        if len(condition) >= 4 and condition[0]:
+            condition_doctype = condition[0]
+
+        if fieldname and _is_financial_requested_field(fieldname, condition_doctype):
+            continue
+        clean_filters.append(condition)
+
+    return clean_filters
 
 
 def _strip_value_financial_fields(value, doctype=None):
@@ -807,6 +936,45 @@ def _remove_financial_columns(result: dict) -> None:
 # ---------------------------------------------------------------------------
 # Export Overrides — blocks financial data from Excel / CSV / PDF exports
 # ---------------------------------------------------------------------------
+
+@frappe.whitelist()
+def reportview_get_override():
+    """
+    Replacement for frappe.desk.reportview.get.
+    Normal list views use this endpoint, so strip protected columns before the
+    browser receives list data.
+    """
+    from frappe.desk.reportview import get as _original
+
+    doctype = frappe.local.form_dict.get("doctype")
+    parent_doctype = frappe.local.form_dict.get("parent_doctype") or frappe.local.form_dict.get("parenttype")
+
+    if not should_apply_rate_guard(doctype, parent_doctype):
+        return _original()
+
+    _strip_financial_fields_from_reportview_form_dict(doctype, parent_doctype)
+    result = _original()
+    return _strip_financial_reportview_keys(result, doctype)
+
+
+@frappe.whitelist()
+def reportview_get_list_override():
+    """
+    Replacement for frappe.desk.reportview.get_list.
+    Covers uncompressed list/report-builder calls that bypass get().
+    """
+    from frappe.desk.reportview import get_list as _original
+
+    doctype = frappe.local.form_dict.get("doctype")
+    parent_doctype = frappe.local.form_dict.get("parent_doctype") or frappe.local.form_dict.get("parenttype")
+
+    if not should_apply_rate_guard(doctype, parent_doctype):
+        return _original()
+
+    _strip_financial_fields_from_reportview_form_dict(doctype, parent_doctype)
+    result = _original()
+    return _strip_financial_reportview_keys(result, doctype)
+
 
 @frappe.whitelist()
 def export_query_report_override(**kwargs):
