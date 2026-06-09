@@ -80,6 +80,38 @@
 		"Purchase Invoice Item",
 	]);
 
+	function as_array(value) {
+		return Array.isArray(value) ? value : [];
+	}
+
+	function get_meta_safe(doctype) {
+		if (!doctype || typeof frappe.get_meta !== "function") return null;
+		try {
+			return frappe.get_meta(doctype);
+		} catch (e) {
+			return null;
+		}
+	}
+
+	function get_docfield_safe(doctype, fieldname) {
+		if (!doctype || !fieldname || typeof frappe.meta?.get_docfield !== "function") return null;
+		try {
+			return frappe.meta.get_docfield(doctype, fieldname);
+		} catch (e) {
+			return null;
+		}
+	}
+
+	function is_table_field(df) {
+		return !!df && as_array(frappe.model?.table_fields).includes(df.fieldtype);
+	}
+
+	function call_if_function(target, method, args) {
+		if (typeof target?.[method] === "function") {
+			return target[method].apply(target, args || []);
+		}
+	}
+
 	function has_allow_rate() {
 		return frappe.session?.user === "Administrator" || (frappe.user_roles || []).includes("Allow Rate");
 	}
@@ -133,29 +165,29 @@
 	function restore_rate_guard_changes(frm) {
 		if (!frm) return;
 
-		(frm.meta?.fields || []).forEach((df) => {
+		as_array(frm.meta?.fields).forEach((df) => {
+			if (!df) return;
 			restore_original_field_state(df);
 
-			if (
-				(frappe.model.table_fields || []).includes(df.fieldtype) &&
-				frm.fields_dict[df.fieldname]?.grid
-			) {
+			if (is_table_field(df) && frm.fields_dict?.[df.fieldname]?.grid) {
 				const grid = frm.fields_dict[df.fieldname].grid;
-				const child_meta = frappe.get_meta(df.options);
+				const child_meta = get_meta_safe(df.options);
 
-				(child_meta?.fields || []).forEach((child_df) => {
+				as_array(child_meta?.fields).forEach((child_df) => {
+					if (!child_df) return;
 					const mapped_df = frappe.meta?.docfield_map?.[df.options]?.[child_df.fieldname];
 
 					restore_original_field_state(child_df);
 					restore_original_field_state(mapped_df);
 				});
 
-				grid.refresh();
+				call_if_function(grid, "refresh");
 			}
 		});
 	}
 
 	function hide_field_without_client_mandatory(frm, df) {
+		if (!frm || !df?.fieldname) return;
 		remember_original_field_state(df);
 
 		df.hidden = 1;
@@ -163,13 +195,14 @@
 		df.in_list_view = 0;
 		df.in_standard_filter = 0;
 
-		frm.set_df_property(df.fieldname, "hidden", 1);
-		frm.set_df_property(df.fieldname, "reqd", 0);
-		frm.set_df_property(df.fieldname, "in_list_view", 0);
-		frm.set_df_property(df.fieldname, "in_standard_filter", 0);
+		call_if_function(frm, "set_df_property", [df.fieldname, "hidden", 1]);
+		call_if_function(frm, "set_df_property", [df.fieldname, "reqd", 0]);
+		call_if_function(frm, "set_df_property", [df.fieldname, "in_list_view", 0]);
+		call_if_function(frm, "set_df_property", [df.fieldname, "in_standard_filter", 0]);
 	}
 
 	function hide_grid_field_without_client_mandatory(grid, child_doctype, child_df) {
+		if (!grid || !child_df?.fieldname) return;
 		remember_original_field_state(child_df);
 
 		child_df.hidden = 1;
@@ -187,10 +220,14 @@
 			mapped_df.in_standard_filter = 0;
 		}
 
-		grid.update_docfield_property(child_df.fieldname, "hidden", 1);
-		grid.update_docfield_property(child_df.fieldname, "reqd", 0);
-		grid.update_docfield_property(child_df.fieldname, "in_list_view", 0);
-		grid.update_docfield_property(child_df.fieldname, "in_standard_filter", 0);
+		call_if_function(grid, "update_docfield_property", [child_df.fieldname, "hidden", 1]);
+		call_if_function(grid, "update_docfield_property", [child_df.fieldname, "reqd", 0]);
+		call_if_function(grid, "update_docfield_property", [child_df.fieldname, "in_list_view", 0]);
+		call_if_function(grid, "update_docfield_property", [
+			child_df.fieldname,
+			"in_standard_filter",
+			0,
+		]);
 	}
 
 	function scrub_grid_financial_columns(grid, child_doctype) {
@@ -219,25 +256,23 @@
 		frm.__rate_guard_applying = true;
 
 		try {
-			(frm.meta?.fields || []).forEach((df) => {
+			as_array(frm.meta?.fields).forEach((df) => {
+				if (!df) return;
 				if (is_financial_field(df)) {
 					hide_field_without_client_mandatory(frm, df);
-				} else if (
-					(frappe.model.table_fields || []).includes(df.fieldtype) &&
-					frm.fields_dict[df.fieldname]?.grid
-				) {
+				} else if (is_table_field(df) && frm.fields_dict?.[df.fieldname]?.grid) {
 					const grid = frm.fields_dict[df.fieldname].grid;
-					const child_meta = frappe.get_meta(df.options);
+					const child_meta = get_meta_safe(df.options);
 					if (!should_apply_rate_guard(df.options)) return;
 
-					(child_meta?.fields || []).forEach((child_df) => {
+					as_array(child_meta?.fields).forEach((child_df) => {
 						if (!is_financial_field(child_df)) return;
 
 						hide_grid_field_without_client_mandatory(grid, df.options, child_df);
 					});
 
 					scrub_grid_financial_columns(grid, df.options);
-					grid.refresh();
+					call_if_function(grid, "refresh");
 				}
 			});
 		} finally {
@@ -286,9 +321,9 @@
 			const original_get_fields_in_list_view = list_proto.get_fields_in_list_view;
 			if (typeof original_get_fields_in_list_view === "function") {
 				list_proto.get_fields_in_list_view = function () {
-					return original_get_fields_in_list_view
-						.apply(this, arguments)
-						.filter((df) => !should_hide_from_list_or_grid(this.doctype, df));
+					return as_array(original_get_fields_in_list_view.apply(this, arguments)).filter(
+						(df) => !should_hide_from_list_or_grid(this.doctype, df)
+					);
 				};
 			}
 		}
@@ -300,12 +335,18 @@
 			const original_add_field = base_list_proto._add_field;
 			if (typeof original_add_field === "function") {
 				base_list_proto._add_field = function (fieldname, doctype) {
+					if (!fieldname) {
+						return original_add_field.apply(this, arguments);
+					}
+
 					const target_doctype =
-						typeof fieldname === "object" ? fieldname.parent || doctype || this.doctype : doctype || this.doctype;
+						typeof fieldname === "object"
+							? fieldname.parent || doctype || this.doctype
+							: doctype || this.doctype;
 					const df =
 						typeof fieldname === "object"
 							? fieldname
-							: frappe.meta?.get_docfield?.(target_doctype, fieldname);
+							: get_docfield_safe(target_doctype, fieldname);
 
 					if (should_hide_from_list_or_grid(target_doctype, df)) return;
 					return original_add_field.apply(this, arguments);
@@ -353,15 +394,23 @@
 		}
 	}
 
-	frappe.after_ajax(() => {
+	function install_rate_guard() {
 		patch_transaction_controller();
 		patch_bom_controller();
 		install_form_hooks();
 		install_list_hooks();
 		if (window.cur_frm) apply_rate_guard_to_form(window.cur_frm);
-	});
+	}
 
-	$(document).on("form-refresh", function () {
-		if (window.cur_frm) apply_rate_guard_to_form(window.cur_frm);
-	});
+	if (typeof frappe.after_ajax === "function") {
+		frappe.after_ajax(install_rate_guard);
+	} else {
+		setTimeout(install_rate_guard, 0);
+	}
+
+	if (window.$ && window.document) {
+		$(document).on("form-refresh", function () {
+			if (window.cur_frm) apply_rate_guard_to_form(window.cur_frm);
+		});
+	}
 })();
