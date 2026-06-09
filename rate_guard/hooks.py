@@ -8,7 +8,7 @@ app_color       = "red"
 app_email       = ""
 app_license     = "MIT"
 
-app_include_js = "/assets/rate_guard/js/rate_guard.js?v=20260609.3"
+app_include_js = "/assets/rate_guard/js/rate_guard.js?v=20260609.5"
 
 before_request = ["rate_guard.overrides.before_request"]
 
@@ -24,8 +24,6 @@ override_whitelisted_methods = {
     "frappe.desk.form.load.getdoctype":                  "rate_guard.overrides.getdoctype_override",
     "frappe.desk.query_report.run":                    "rate_guard.overrides.run_report_override",
     "frappe.desk.query_report.export_query":           "rate_guard.overrides.export_query_report_override",
-    "frappe.desk.reportview.get":                      "rate_guard.overrides.reportview_get_override",
-    "frappe.desk.reportview.get_list":                 "rate_guard.overrides.reportview_get_list_override",
     "frappe.desk.reportview.export_query":             "rate_guard.overrides.export_listview_override",
     "frappe.www.printview.get_html_and_style":          "rate_guard.overrides.get_html_and_style_override",
     "frappe.www.printview.get_rendered_raw_commands":   "rate_guard.overrides.get_rendered_raw_commands_override",
