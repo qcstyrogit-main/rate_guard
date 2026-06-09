@@ -317,10 +317,10 @@
 		if (window.cur_frm) apply_rate_guard_to_form(window.cur_frm);
 	}
 
+	setTimeout(install_rate_guard, 0);
+
 	if (typeof frappe.after_ajax === "function") {
 		frappe.after_ajax(install_rate_guard);
-	} else {
-		setTimeout(install_rate_guard, 0);
 	}
 
 	if (window.$ && window.document) {

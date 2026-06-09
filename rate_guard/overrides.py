@@ -313,6 +313,81 @@ def diagnose_transaction_grid_settings():
     }
 
 
+@frappe.whitelist()
+def diagnose_rate_guard_state(parent_doctype="Stock Entry", child_doctype="Stock Entry Detail"):
+    """Return the Rate Guard state that affects a parent form and one child table."""
+    from frappe.model.utils.user_settings import sync_user_settings
+
+    sync_user_settings()
+
+    roles = frappe.get_roles(frappe.session.user) if frappe.session.user != "Guest" else []
+
+    watched_fields = []
+    try:
+        child_meta = frappe.get_meta(child_doctype)
+        for field in child_meta.fields:
+            if _is_financial_field(field) or field.fieldname in (
+                "basic_rate",
+                "basic_amount",
+                "additional_cost",
+                "amount",
+                "valuation_rate",
+                "landed_cost_voucher_amount",
+                "customer_provided_item_cost",
+            ):
+                watched_fields.append({
+                    "fieldname": field.fieldname,
+                    "label": field.label,
+                    "fieldtype": field.fieldtype,
+                    "hidden": field.hidden,
+                    "reqd": field.reqd,
+                    "in_list_view": field.in_list_view,
+                    "columns": getattr(field, "columns", None),
+                    "is_financial": _is_financial_field(field),
+                })
+    except Exception as exc:
+        watched_fields.append({"error": str(exc)})
+
+    user_settings = {}
+    try:
+        row = frappe.db.get_value(
+            "__UserSettings",
+            {"user": frappe.session.user, "doctype": parent_doctype},
+            "data",
+        )
+        user_settings = json.loads(row or "{}")
+    except Exception as exc:
+        user_settings = {"error": str(exc)}
+
+    property_setters = frappe.db.sql(
+        """
+        select name, doc_type, field_name, property, value
+        from `tabProperty Setter`
+        where doc_type = %(child_doctype)s
+          and field_name in %(fieldnames)s
+        order by field_name, property
+        """,
+        {
+            "child_doctype": child_doctype,
+            "fieldnames": tuple(field["fieldname"] for field in watched_fields if field.get("fieldname")) or ("",),
+        },
+        as_dict=True,
+    )
+
+    return {
+        "user": frappe.session.user,
+        "roles": roles,
+        "has_allow_rate": has_allow_rate(),
+        "parent_doctype": parent_doctype,
+        "child_doctype": child_doctype,
+        "should_apply_parent": should_apply_rate_guard(parent_doctype),
+        "should_apply_child": should_apply_rate_guard(child_doctype),
+        "watched_fields": watched_fields,
+        "grid_view_user_settings": (user_settings.get("GridView") or {}).get(child_doctype),
+        "property_setters": property_setters,
+    }
+
+
 def _is_financial_field(field) -> bool:
     ft = getattr(field, "fieldtype", None) or field.get("fieldtype", "")
     fn = (getattr(field, "fieldname", None) or field.get("fieldname", "") or "").lower()
