@@ -57,6 +57,11 @@ EXCLUDED_DOCTYPES = frozenset([
     "Sales Invoice Item",
     "Purchase Invoice",
     "Purchase Invoice Item",
+    "Payment Entry",
+    "Payment Entry Reference",
+    "Advance Taxes and Charges",
+    "Payment Entry Deduction",
+    "Tax Withholding Entry",
 ])
 
 EXCLUDED_REPORTS = frozenset([
