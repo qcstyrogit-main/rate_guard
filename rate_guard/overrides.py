@@ -64,6 +64,10 @@ EXCLUDED_DOCTYPES = frozenset([
     "Tax Withholding Entry",
 ])
 
+EXCLUDED_MODULES = frozenset([
+    "Accounts",
+])
+
 EXCLUDED_REPORTS = frozenset([
     "Sales Register",
     "Purchase Register",
@@ -101,10 +105,48 @@ def has_allow_rate() -> bool:
     return "Allow Rate" in frappe.get_roles(user)
 
 
+_DOCTYPE_MODULE_CACHE = {}
+
+
+def _get_doctype_name(value):
+    if isinstance(value, str):
+        value = _loads_json(value)
+
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return value.get("doctype") or value.get("name")
+
+    return getattr(value, "doctype", None) or getattr(value, "name", None)
+
+
+def _doctype_in_excluded_module(doctype):
+    doctype = _get_doctype_name(doctype)
+    if not doctype:
+        return False
+
+    if doctype not in _DOCTYPE_MODULE_CACHE:
+        try:
+            _DOCTYPE_MODULE_CACHE[doctype] = frappe.db.get_value("DocType", doctype, "module")
+        except Exception:
+            _DOCTYPE_MODULE_CACHE[doctype] = None
+
+    return _DOCTYPE_MODULE_CACHE[doctype] in EXCLUDED_MODULES
+
+
 def should_apply_rate_guard(doctype=None, parent_doctype=None) -> bool:
     if has_allow_rate():
         return False
-    return doctype not in EXCLUDED_DOCTYPES and parent_doctype not in EXCLUDED_DOCTYPES
+
+    doctype = _get_doctype_name(doctype)
+    parent_doctype = _get_doctype_name(parent_doctype)
+
+    return (
+        doctype not in EXCLUDED_DOCTYPES
+        and parent_doctype not in EXCLUDED_DOCTYPES
+        and not _doctype_in_excluded_module(doctype)
+        and not _doctype_in_excluded_module(parent_doctype)
+    )
 
 
 def should_apply_rate_guard_to_report(report_name=None) -> bool:

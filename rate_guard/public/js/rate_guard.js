@@ -78,6 +78,14 @@
 		"Sales Invoice Item",
 		"Purchase Invoice",
 		"Purchase Invoice Item",
+		"Payment Entry",
+		"Payment Entry Reference",
+		"Advance Taxes and Charges",
+		"Payment Entry Deduction",
+		"Tax Withholding Entry",
+	]);
+	const EXCLUDED_MODULES = new Set([
+		"Accounts",
 	]);
 
 	function as_array(value) {
@@ -107,8 +115,13 @@
 		return frappe.session?.user === "Administrator" || (frappe.user_roles || []).includes("Allow Rate");
 	}
 
-	function should_apply_rate_guard(doctype) {
-		return !has_allow_rate() && !EXCLUDED_DOCTYPES.has(doctype);
+	function is_excluded_module(meta) {
+		return EXCLUDED_MODULES.has(meta?.module);
+	}
+
+	function should_apply_rate_guard(doctype, meta) {
+		const doctype_meta = meta || get_meta_safe(doctype);
+		return !has_allow_rate() && !EXCLUDED_DOCTYPES.has(doctype) && !is_excluded_module(doctype_meta);
 	}
 
 	function is_financial_field(df) {
@@ -223,7 +236,7 @@
 
 	function apply_rate_guard_to_form(frm) {
 		if (!frm || frm.__rate_guard_applying) return;
-		if (!should_apply_rate_guard(frm.doctype)) {
+		if (!should_apply_rate_guard(frm.doctype, frm.meta)) {
 			restore_rate_guard_changes(frm);
 			return;
 		}
@@ -238,7 +251,7 @@
 				} else if (is_table_field(df) && frm.fields_dict?.[df.fieldname]?.grid) {
 					const grid = frm.fields_dict[df.fieldname].grid;
 					const child_meta = get_meta_safe(df.options);
-					if (!should_apply_rate_guard(df.options)) return;
+					if (!should_apply_rate_guard(df.options, child_meta)) return;
 
 					as_array(child_meta?.fields).forEach((child_df) => {
 						if (!is_financial_field(child_df)) return;
