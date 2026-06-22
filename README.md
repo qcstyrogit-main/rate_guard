@@ -76,6 +76,11 @@ transaction values:
 - Sales Invoice Item
 - Purchase Invoice
 - Purchase Invoice Item
+- Payment Entry
+- Payment Entry Reference
+- Payment Entry Deduction
+- Advance Taxes and Charges
+- Tax Withholding Entry
 
 ## Excluded reports
 
