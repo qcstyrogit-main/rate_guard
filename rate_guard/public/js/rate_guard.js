@@ -63,6 +63,8 @@
 		"process_loss_percentage",
 		"process_loss_per",
 		"rate_per_minute",
+		"custom_material_ratio_percent", 
+		"custom_total_formulation_percent",
 		"custom_rate_per_minute",
 		"latitude",
 		"longitude",
