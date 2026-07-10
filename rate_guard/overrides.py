@@ -42,7 +42,9 @@ ALWAYS_VISIBLE = frozenset([
     "conversion_rate", "plc_conversion_rate",
     "idx", "docstatus", "progress", "percent_complete",
     "cost_allocation_per", "process_loss_percentage", "process_loss_per",
-    "rate_per_minute", "custom_rate_per_minute",
+    "rate_per_minute",  "custom_material_ratio_percent", 
+    "custom_total_formulation_percent", 
+    "custom_rate_per_minute",
     "latitude", "longitude",
 ])
 
